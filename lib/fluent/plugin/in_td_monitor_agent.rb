@@ -424,8 +424,7 @@ module Fluent
     # from macaddr gem
     module Mac
       class << self
-
-        ##
+       ##
         # Accessor for the system's first MAC address, requires a call to #address
         # first
 
@@ -440,27 +439,50 @@ module Fluent
 
         def address
           return @mac_address if defined? @mac_address and @mac_address
-          re = %r/[^:\-](?:[0-9A-F][0-9A-F][:\-]){5}[0-9A-F][0-9A-F][^:\-]/io
-          cmds = '/sbin/ifconfig', '/bin/ifconfig', 'ifconfig', 'ipconfig /all', 'cat /sys/class/net/*/address'
 
-          null = test(?e, '/dev/null') ? '/dev/null' : 'NUL'
+          @mac_address = from_getifaddrs
+          return @mac_address if @mac_address
+
+          cmds = '/sbin/ifconfig', '/bin/ifconfig', 'ifconfig', 'ipconfig /all', 'cat /sys/class/net/*/address'
 
           output = nil
           cmds.each do |cmd|
-            begin
-              r, w = IO.pipe
-              ::Process.waitpid(spawn(cmd, :out => w))
-              w.close
-              stdout = r.read
-              next unless stdout and stdout.size > 0
-              output = stdout and break
-            rescue
-              # go to next command!
-            end
+            _, stdout, _ = systemu(cmd) rescue next
+            next unless stdout and stdout.size > 0
+            output = stdout and break
           end
           raise "all of #{ cmds.join ' ' } failed" unless output
 
           @mac_address = parse(output)
+        end
+
+        link   = Socket::PF_LINK   if Socket.const_defined? :PF_LINK
+        packet = Socket::PF_PACKET if Socket.const_defined? :PF_PACKET
+        INTERFACE_PACKET_FAMILY = link || packet # :nodoc:
+
+        def from_getifaddrs
+          return unless Socket.respond_to? :getifaddrs
+
+          interfaces = Socket.getifaddrs.select do |addr|
+            addr.addr.pfamily == INTERFACE_PACKET_FAMILY
+          end
+
+          mac, =
+            if Socket.const_defined? :PF_LINK then
+              interfaces.map do |addr|
+                addr.addr.getnameinfo
+              end.find do |m,|
+                !m.empty?
+              end
+            elsif Socket.const_defined? :PF_PACKET then
+              interfaces.map do |addr|
+                addr.addr.inspect_sockaddr[/hwaddr=([\h:]+)/, 1]
+              end.find do |mac_addr|
+                mac_addr != '00:00:00:00:00:00'
+              end
+            end
+
+          @mac_address = mac if mac
         end
 
         def parse(output)
@@ -477,6 +499,11 @@ module Fluent
           maddr.instance_eval{ @list = candidates; def list() @list end }
           maddr
         end
+
+        ##
+        # Shorter alias for #address
+
+        alias_method "addr", "address"
       end
 
       RE = %r/(?:[^:\-]|\A)(?:[0-9A-F][0-9A-F][:\-]){5}[0-9A-F][0-9A-F](?:[^:\-]|\Z)/io
